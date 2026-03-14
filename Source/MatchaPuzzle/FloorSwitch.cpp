@@ -5,11 +5,14 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 AFloorSwitch::AFloorSwitch()
 {
-	// No Tick needed — all logic is driven by overlap events
-	PrimaryActorTick.bCanEverTick = false;
+	// Tick is needed only for smooth button animation; kept enabled so
+	// bAnimatePress can be toggled at runtime without a restart.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 
 	// Trigger volume as root so the actor's transform drives the switch position
 	TriggerVolume = CreateDefaultSubobject<UBoxComponent>(TEXT("TriggerVolume"));
@@ -19,11 +22,15 @@ AFloorSwitch::AFloorSwitch()
 	TriggerVolume->SetCollisionProfileName(TEXT("OverlapOnlyPawn"));
 	TriggerVolume->SetGenerateOverlapEvents(true);
 
-	// Visible mesh — attach to root so it moves with the actor.
-	// Assign a static mesh in the Details panel or a child Blueprint.
-	SwitchMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("SwitchMesh"));
-	SwitchMesh->SetupAttachment(RootComponent);
-	SwitchMesh->SetCollisionProfileName(TEXT("NoCollision"));
+	// Fixed base — never moves. Assign a mesh in the Details panel.
+	BaseMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BaseMesh"));
+	BaseMesh->SetupAttachment(RootComponent);
+	BaseMesh->SetCollisionProfileName(TEXT("NoCollision"));
+
+	// Button — moves along local Z to reflect pressed / released state.
+	ButtonMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ButtonMesh"));
+	ButtonMesh->SetupAttachment(RootComponent);
+	ButtonMesh->SetCollisionProfileName(TEXT("NoCollision"));
 }
 
 void AFloorSwitch::BeginPlay()
@@ -37,6 +44,50 @@ void AFloorSwitch::BeginPlay()
 
 	TriggerVolume->OnComponentEndOverlap.AddDynamic(
 		this, &AFloorSwitch::OnTriggerEndOverlap);
+
+	// Cache button positions from the editor-placed relative location of ButtonMesh.
+	// These are computed once here and never changed again — Tick always interpolates
+	// toward one of these two fixed targets, so there is no cumulative drift.
+	if (ButtonMesh)
+	{
+		ReleasedLocation = ButtonMesh->GetRelativeLocation();
+		PressedLocation  = ReleasedLocation - FVector(0.f, 0.f, ButtonPressDepth);
+
+		// Create a dynamic material instance for ButtonMesh slot 0 so we can drive
+		// the IsPressed scalar parameter at runtime. BaseMesh is never touched.
+		if (UMaterialInterface* BaseMat = ButtonMesh->GetMaterial(0))
+		{
+			ButtonMaterialInstance = UMaterialInstanceDynamic::Create(BaseMat, this);
+			ButtonMesh->SetMaterial(0, ButtonMaterialInstance);
+		}
+	}
+
+	// Sync ButtonMesh position and material to the initial bIsPressed value.
+	// If the switch somehow starts pressed, both the mesh offset and the
+	// IsPressed parameter will reflect that immediately.
+	SetPressedState(bIsPressed);
+}
+
+void AFloorSwitch::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!bAnimatePress || !ButtonMesh)
+	{
+		return;
+	}
+
+	// Target is one of the two stable positions computed once in BeginPlay.
+	// Reading and writing relative location keeps everything in local space,
+	// so the button cannot drift regardless of the actor's world transform.
+	const FVector Target  = bIsPressed ? PressedLocation : ReleasedLocation;
+	const FVector Current = ButtonMesh->GetRelativeLocation();
+
+	if (!Current.Equals(Target, 0.1f))
+	{
+		ButtonMesh->SetRelativeLocation(
+			FMath::VInterpTo(Current, Target, DeltaSeconds, ButtonMoveSpeed));
+	}
 }
 
 // ── Overlap callbacks ──────────────────────────────────────────────────────────
@@ -59,6 +110,7 @@ void AFloorSwitch::OnTriggerBeginOverlap(
 	{
 		bToggleState = !bToggleState;
 		SetTargetsActivated(bToggleState);
+		SetPressedState(bToggleState);
 		return;
 	}
 
@@ -70,6 +122,7 @@ void AFloorSwitch::OnTriggerBeginOverlap(
 
 	bHasTriggered = true;
 	SetTargetsActivated(true);
+	SetPressedState(true);
 }
 
 void AFloorSwitch::OnTriggerEndOverlap(
@@ -90,6 +143,7 @@ void AFloorSwitch::OnTriggerEndOverlap(
 	}
 
 	SetTargetsActivated(false);
+	SetPressedState(false);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -114,4 +168,26 @@ void AFloorSwitch::SetTargetsActivated(bool bActivate) const
 			Switchable->SetActivated(bActivate);
 		}
 	}
+}
+
+void AFloorSwitch::SetPressedState(bool bPressed)
+{
+	bIsPressed = bPressed;
+
+	// Update the IsPressed scalar parameter on ButtonMesh's dynamic material.
+	// SetScalarParameterValue is a no-op if the parameter name does not exist,
+	// so this is safe even if the material does not expose IsPressed.
+	if (ButtonMaterialInstance)
+	{
+		ButtonMaterialInstance->SetScalarParameterValue(
+			TEXT("IsPressed"), bIsPressed ? 1.0f : 0.0f);
+	}
+
+	if (!bAnimatePress && ButtonMesh)
+	{
+		// Snap immediately; Tick will not move the button further.
+		ButtonMesh->SetRelativeLocation(bIsPressed ? PressedLocation : ReleasedLocation);
+	}
+	// Animated case: Tick() drives the interpolation each frame toward the
+	// stable PressedLocation or ReleasedLocation — no offset is applied here.
 }

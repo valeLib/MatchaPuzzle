@@ -8,6 +8,7 @@
 
 class UBoxComponent;
 class UStaticMeshComponent;
+class UMaterialInstanceDynamic;
 
 /**
  *  A pressure-sensitive floor switch that activates one or more ISwitchable
@@ -20,7 +21,10 @@ class UStaticMeshComponent;
  *   3. Optionally enable bOneShot so targets stay activated permanently after
  *      the first trigger regardless of whether the player remains on the switch.
  *
- *  No Tick is used — all logic is event-driven via overlap callbacks.
+ *  Visual layout:
+ *   Root (TriggerVolume)
+ *   ├─ BaseMesh   — fixed, never moves
+ *   └─ ButtonMesh — moves along local Z to show pressed / released state
  */
 UCLASS()
 class AFloorSwitch : public AActor
@@ -35,10 +39,15 @@ class AFloorSwitch : public AActor
 		meta = (AllowPrivateAccess = "true"))
 	UBoxComponent* TriggerVolume;
 
-	/** Visible geometry for the switch (pressure plate, button, etc.) */
+	/** Fixed base geometry — never moves. Assign a mesh in the Details panel. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components",
 		meta = (AllowPrivateAccess = "true"))
-	UStaticMeshComponent* SwitchMesh;
+	UStaticMeshComponent* BaseMesh;
+
+	/** Button geometry — moves along local Z to indicate pressed / released state. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components",
+		meta = (AllowPrivateAccess = "true"))
+	UStaticMeshComponent* ButtonMesh;
 
 public:
 
@@ -47,6 +56,7 @@ public:
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 
 	// ── Linked targets ────────────────────────────────────────────────────────
 
@@ -82,6 +92,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Switch|Behaviour")
 	bool bToggleable = false;
 
+	// ── Button visual ─────────────────────────────────────────────────────────
+
+	/** How far (cm) ButtonMesh lowers along its local Z when pressed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Switch|Button", meta = (ClampMin = "0.0"))
+	float ButtonPressDepth = 8.f;
+
+	/** Interpolation speed for the button animation (higher = snappier). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Switch|Button", meta = (ClampMin = "0.1"))
+	float ButtonMoveSpeed = 10.f;
+
+	/** When true ButtonMesh interpolates smoothly; when false it snaps instantly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Switch|Button")
+	bool bAnimatePress = true;
+
 private:
 
 	/** Prevents a one-shot switch from re-firing after its first activation */
@@ -89,6 +113,23 @@ private:
 
 	/** Tracks the current on/off state for toggleable switches */
 	bool bToggleState = false;
+
+	/** Current visual pressed state of the button */
+	bool bIsPressed = false;
+
+	/** ButtonMesh relative location when released (stored once at BeginPlay) */
+	FVector ReleasedLocation = FVector::ZeroVector;
+
+	/** ButtonMesh relative location when fully pressed (derived once at BeginPlay) */
+	FVector PressedLocation = FVector::ZeroVector;
+
+	/**
+	 * Dynamic material instance created from ButtonMesh material slot 0 at BeginPlay.
+	 * Used to drive the IsPressed scalar parameter (0.0 released, 1.0 pressed).
+	 * Null if ButtonMesh has no material assigned.
+	 */
+	UPROPERTY()
+	UMaterialInstanceDynamic* ButtonMaterialInstance = nullptr;
 
 	// ── Overlap callbacks ─────────────────────────────────────────────────────
 
@@ -115,4 +156,11 @@ private:
 
 	/** Calls SetActivated(bActivate) on every ISwitchable entry in LinkedTargets */
 	void SetTargetsActivated(bool bActivate) const;
+
+	/**
+	 * Updates the button visual state: moves ButtonMesh and sets the IsPressed
+	 * material parameter. If bAnimatePress is true the movement is driven by
+	 * Tick via VInterpTo; otherwise ButtonMesh snaps immediately.
+	 */
+	void SetPressedState(bool bPressed);
 };

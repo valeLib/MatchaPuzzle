@@ -1,0 +1,39 @@
+# Unreal generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+.vscode/
+.claude/
+
+# Packaged builds
+Windows/
+WindowsNoEditor/
+Builds/
+
+# Visual Studio
+*.VC.db
+*.opensdf
+*.sdf
+*.suo
+
+
+# Local Plugins (generados)
+**/Plugins/**/Intermediate/*
+**/Plugins/**/Binaries/*
+**/Plugins/**/Saved/*
+
+# Temp / user settings
+Config/DefaultEditorPerProjectUserSettings.ini
+
+# Debug and packaged outputs
+*.pdb
+*.exe
+
+# Optional OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+

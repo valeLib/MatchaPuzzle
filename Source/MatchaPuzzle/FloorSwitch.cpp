@@ -134,13 +134,23 @@ void AFloorSwitch::OnTriggerBeginOverlap(
 		return;
 	}
 
-	SetTargetsActivated(true);
+	// bHasTriggered is the authoritative one-shot spent guard.  bIsEnabled is
+	// also false after a one-shot fires (SetActivated(false) is called below),
+	// so in practice this check is only reached when a race condition re-enables
+	// the switch during the same frame.  It is cheap and makes intent explicit.
+	if (bOneShot && bHasTriggered)
+	{
+		return;
+	}
+
+	SendTargetCommands();
 	ActivatePressTargets();
 
 	if (bOneShot)
 	{
+		bHasTriggered = true;
 		// Self-disable: sinks the button and blocks future overlaps.
-		// An external SetActivated(true) re-arms the switch.
+		// An external SetActivated(true) clears bHasTriggered and re-arms it.
 		SetActivated(false);
 	}
 	else
@@ -167,8 +177,9 @@ void AFloorSwitch::OnTriggerEndOverlap(
 		return;
 	}
 
-	// Reusable: deactivate linked targets and return to released visual.
-	SetTargetsActivated(false);
+	// Reusable: return the button to the elevated / ready visual.
+	// Target commands are NOT reversed here — the platform (or other target)
+	// keeps whatever state it was sent to when the switch was pressed.
 	SetPressedState(false);
 }
 
@@ -185,18 +196,18 @@ bool AFloorSwitch::IsLocalPlayer(const AActor* OtherActor)
 	return OverlappingPawn && OverlappingPawn->IsPlayerControlled();
 }
 
-void AFloorSwitch::SetTargetsActivated(bool bActivate) const
+void AFloorSwitch::SendTargetCommands() const
 {
-	for (const TObjectPtr<AActor>& Target : LinkedTargets)
+	for (const FSwitchTarget& Entry : LinkedTargets)
 	{
-		if (!Target)
+		if (!Entry.Target)
 		{
 			continue;
 		}
 
-		if (ISwitchable* Switchable = Cast<ISwitchable>(Target.Get()))
+		if (ISwitchable* Switchable = Cast<ISwitchable>(Entry.Target.Get()))
 		{
-			Switchable->SetActivated(bActivate);
+			Switchable->SetActivated(Entry.bActivate);
 		}
 	}
 }
@@ -204,6 +215,13 @@ void AFloorSwitch::SetTargetsActivated(bool bActivate) const
 void AFloorSwitch::SetActivated(bool bActivate)
 {
 	bIsEnabled = bActivate;
+
+	if (bActivate)
+	{
+		// Re-arm: clear the one-shot spent flag so the switch can fire again.
+		// Harmless for reusable switches (bHasTriggered is always false there).
+		bHasTriggered = false;
+	}
 
 	// Pressed = Disabled, Released = Enabled — the visual state always matches
 	// the enabled state so the player can read the switch at a glance.

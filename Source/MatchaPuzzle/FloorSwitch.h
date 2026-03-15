@@ -12,6 +12,39 @@ class UStaticMeshComponent;
 class UMaterialInstanceDynamic;
 
 /**
+ * One entry in a FloorSwitch's LinkedTargets array.
+ *
+ * bActivate controls which state the target actor is sent to when this switch
+ * fires.  For a MovingPlatform this maps directly to its two positions:
+ *
+ *   bActivate = true  → SetActivated(true)  → platform moves to Activated
+ *                        (StartLocation + SwitchOffset)
+ *   bActivate = false → SetActivated(false) → platform returns to Base
+ *                        (StartLocation)
+ *
+ * Two switches can therefore control the same platform in opposite directions:
+ *   Switch A: bActivate = true   (sends platform to Activated)
+ *   Switch B: bActivate = false  (sends platform back to Base)
+ */
+USTRUCT(BlueprintType)
+struct FSwitchTarget
+{
+	GENERATED_BODY()
+
+	/** The actor to send the command to.  Must implement ISwitchable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TObjectPtr<AActor> Target = nullptr;
+
+	/**
+	 * The state to request on the target when this switch fires.
+	 *   true  = Activated  (e.g. platform moves to StartLocation + SwitchOffset)
+	 *   false = Base       (e.g. platform returns to StartLocation)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bActivate = true;
+};
+
+/**
  *  A pressure-sensitive floor switch that activates one or more ISwitchable
  *  actors when the player steps on it.
  *
@@ -21,10 +54,11 @@ class UMaterialInstanceDynamic;
  *  Two modes (bOneShot):
  *
  *  Reusable (bOneShot = false):
- *   Behaves like a held button.  Stepping on it presses (disables) it and
- *   activates LinkedTargets; stepping off releases (re-enables) it and
- *   deactivates them.  TargetsToEnableOnPress / TargetsToDisableOnPress are
- *   evaluated on press only.  The switch can be used any number of times.
+ *   Fires its target commands on press, then returns to the elevated / ready
+ *   visual when the player steps off.  The target command is NOT reversed on
+ *   release — the platform (or other target) keeps its state.  The switch
+ *   itself is re-enabled immediately and can be pressed again.
+ *   TargetsToEnableOnPress / TargetsToDisableOnPress are evaluated on press only.
  *
  *  One-shot (bOneShot = true):
  *   The switch fires once, self-disables (stays sunken), and ignores further
@@ -85,17 +119,17 @@ protected:
 	// ── Linked targets ────────────────────────────────────────────────────────
 
 	/**
-	 * Actors driven by the press / release cycle.
-	 * Each entry must implement ISwitchable; non-implementing actors are skipped.
+	 * Actors sent a one-time command when this switch fires.
+	 * Each entry pairs an ISwitchable target with the desired state to request.
+	 * Non-implementing actors are skipped.
 	 *
-	 * On press   → SetActivated(true)
-	 * On release → SetActivated(false)  [reusable only]
+	 * On press → Target->SetActivated(Entry.bActivate)
+	 * On release → nothing (the target keeps whatever state it was sent to)
 	 *
-	 * For press-only switch chaining use TargetsToEnableOnPress /
-	 * TargetsToDisableOnPress alongside or instead of this array.
+	 * For switch chaining use TargetsToEnableOnPress / TargetsToDisableOnPress.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Switch|Targets")
-	TArray<TObjectPtr<AActor>> LinkedTargets;
+	TArray<FSwitchTarget> LinkedTargets;
 
 	/**
 	 * ISwitchable actors that receive SetActivated(true) the moment this switch
@@ -186,6 +220,14 @@ private:
 	 *  false means the button is sunken/disabled (IsPressed = 1). */
 	bool bIsEnabled = true;
 
+	/**
+	 * True after a one-shot switch has fired and self-disabled.
+	 * Cleared by SetActivated(true) so the switch can fire again after being
+	 * re-armed by an external actor.  Only meaningful when bOneShot = true;
+	 * always false for reusable switches.
+	 */
+	bool bHasTriggered = false;
+
 	/** Current visual pressed state of the button */
 	bool bIsPressed = false;
 
@@ -235,10 +277,11 @@ private:
 	static bool IsLocalPlayer(const AActor* OtherActor);
 
 	/**
-	 * Calls SetActivated(bActivate) on every ISwitchable entry in LinkedTargets.
+	 * Sends each LinkedTarget its configured command (Entry.bActivate).
+	 * Called once per successful press; never on overlap end.
 	 * Non-implementing actors are skipped.
 	 */
-	void SetTargetsActivated(bool bActivate) const;
+	void SendTargetCommands() const;
 
 	/**
 	 * Calls SetActivated(true)  on every entry in TargetsToEnableOnPress and

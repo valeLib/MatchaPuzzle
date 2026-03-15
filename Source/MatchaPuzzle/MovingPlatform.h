@@ -34,8 +34,9 @@ enum class EPlatformControlMode : uint8
  *  follow continuous directional input from an AClawMachineLever (LeverControlled).
  *
  *  SwitchControlled behaviour:
- *   SetActivated(true)  — platform advances toward StartLocation + SwitchOffset.
- *   SetActivated(false) — platform returns to StartLocation (when bReturnWhenReleased).
+ *   SetActivated(true)  — platform moves to   Activated = StartLocation + SwitchOffset.
+ *   SetActivated(false) — platform returns to  Base      = StartLocation.
+ *   Both directions are unconditional and fire-and-forget.
  *
  *  LeverControlled behaviour:
  *   AClawMachineLever calls SetLeverInput(H, V) whenever its values change.
@@ -131,16 +132,6 @@ protected:
 			EditCondition = "ControlMode == EPlatformControlMode::SwitchControlled",
 			EditConditionHides))
 	float MoveDuration = 1.f;
-
-	/**
-	 * When true the platform returns to its base position once the switch is
-	 * released.  When false it holds at the target position until explicitly
-	 * deactivated by a one-shot or second trigger.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Switch",
-		meta = (EditCondition = "ControlMode == EPlatformControlMode::SwitchControlled",
-			EditConditionHides))
-	bool bReturnWhenReleased = true;
 
 	// ── Lever-controlled mode parameters ─────────────────────────────────────
 

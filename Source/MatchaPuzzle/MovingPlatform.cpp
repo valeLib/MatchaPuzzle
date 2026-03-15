@@ -111,10 +111,11 @@ void AMovingPlatform::TickSwitchControlled(float DeltaTime)
 		return;
 	}
 
-	// Determine whether the platform still needs to move this frame.
-	// This avoids calling SetActorLocation every frame once the platform is at rest.
-	const bool bShouldAdvance = bIsActivated && MoveProgress < 1.f;
-	const bool bShouldRewind  = !bIsActivated && bReturnWhenReleased && MoveProgress > 0.f;
+	// SetActivated(true)  → Activated = StartLocation + SwitchOffset (advance to 1)
+	// SetActivated(false) → Base      = StartLocation               (rewind to 0)
+	// Both transitions are unconditional; the platform always completes its journey.
+	const bool bShouldAdvance = bIsActivated  && MoveProgress < 1.f;
+	const bool bShouldRewind  = !bIsActivated && MoveProgress > 0.f;
 
 	if (!bShouldAdvance && !bShouldRewind)
 	{

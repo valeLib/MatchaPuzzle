@@ -106,13 +106,15 @@ void AMovingPlatform::TickAutomatic(float DeltaTime)
 
 void AMovingPlatform::TickSwitchControlled(float DeltaTime)
 {
-	if (MoveDuration <= 0.f)
+	// A zero-length offset or zero speed means there is nowhere to go.
+	const float Distance = SwitchOffset.Size();
+	if (Distance < KINDA_SMALL_NUMBER || SwitchMoveSpeed <= 0.f)
 	{
 		return;
 	}
 
 	// SetActivated(true)  → Activated = StartLocation + SwitchOffset (advance to 1)
-	// SetActivated(false) → Base      = StartLocation               (rewind to 0)
+	// SetActivated(false) → Base      = StartLocation               (rewind  to 0)
 	// Both transitions are unconditional; the platform always completes its journey.
 	const bool bShouldAdvance = bIsActivated  && MoveProgress < 1.f;
 	const bool bShouldRewind  = !bIsActivated && MoveProgress > 0.f;
@@ -122,8 +124,14 @@ void AMovingPlatform::TickSwitchControlled(float DeltaTime)
 		return;
 	}
 
-	// Drive progress forward or backward at a constant rate
-	const float ProgressRate = DeltaTime / MoveDuration;
+	// Convert world-space speed (units/sec) to a normalised progress rate.
+	// Dividing by Distance means one unit of MoveProgress always corresponds to
+	// exactly one unit of world travel, so SwitchMoveSpeed is consistent across
+	// platforms with different SwitchOffset magnitudes.
+	//
+	//   TravelTime  = Distance / SwitchMoveSpeed          (seconds, implicit)
+	//   ProgressRate = SwitchMoveSpeed / Distance * DeltaTime   (per frame)
+	const float ProgressRate = (SwitchMoveSpeed / Distance) * DeltaTime;
 
 	if (bShouldAdvance)
 	{
@@ -134,9 +142,9 @@ void AMovingPlatform::TickSwitchControlled(float DeltaTime)
 		MoveProgress = FMath::Clamp(MoveProgress - ProgressRate, 0.f, 1.f);
 	}
 
-	// SmoothStep gives an ease-in / ease-out feel without requiring a curve asset.
-	// It maps the linear progress to a smooth S-curve that still reaches exactly
-	// 0 and 1 at the endpoints, keeping the motion deterministic.
+	// SmoothStep maps normalised progress to a smooth S-curve (ease-in / ease-out)
+	// that still reaches exactly 0 and 1 at the endpoints — deterministic at any
+	// frame rate because MoveProgress accumulates in normalised space.
 	const float SmoothedProgress = FMath::SmoothStep(0.f, 1.f, MoveProgress);
 
 	SetActorLocation(StartLocation + SwitchOffset * SmoothedProgress);

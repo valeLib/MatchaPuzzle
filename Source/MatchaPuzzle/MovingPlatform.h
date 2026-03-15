@@ -124,14 +124,19 @@ protected:
 	FVector SwitchOffset = FVector(0.f, 0.f, 200.f);
 
 	/**
-	 * Time in seconds to travel from the base to the target position (and back).
-	 * Must be greater than zero.
+	 * Travel speed in world units per second.
+	 * The actual travel time is derived automatically from SwitchOffset.Size(),
+	 * so changing the offset never requires a manual time adjustment:
+	 *
+	 *   TravelTime = SwitchOffset.Size() / SwitchMoveSpeed
+	 *
+	 * Example: SwitchOffset = (0, 0, 300), SwitchMoveSpeed = 150 → 2 s.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Switch",
-		meta = (ClampMin = "0.01",
+		meta = (ClampMin = "1.0",
 			EditCondition = "ControlMode == EPlatformControlMode::SwitchControlled",
 			EditConditionHides))
-	float MoveDuration = 1.f;
+	float SwitchMoveSpeed = 200.f;
 
 	// ── Lever-controlled mode parameters ─────────────────────────────────────
 

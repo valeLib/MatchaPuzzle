@@ -33,9 +33,34 @@ AFloorSwitch::AFloorSwitch()
 	ButtonMesh->SetCollisionProfileName(TEXT("NoCollision"));
 }
 
+void AFloorSwitch::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+
+	// Create or reuse DMIs and push the TileOffset values immediately.
+	// This makes every property change in the Details panel visible in the
+	// viewport without requiring PIE, because OnConstruction fires on every
+	// edit.  At runtime OnConstruction also runs once before BeginPlay, so
+	// BeginPlay will find valid DMI pointers already in place.
+	InitMaterialInstances();
+	ApplyMaterialParameters();
+
+	// Preview the pressed / released state in the viewport based on bStartEnabled.
+	// Only the material parameter is driven here — mesh position preview is skipped
+	// because ReleasedLocation / PressedLocation are not computed until BeginPlay.
+	if (ButtonMaterialInstance)
+	{
+		ButtonMaterialInstance->SetScalarParameterValue(
+			TEXT("IsPressed"), bStartEnabled ? 0.0f : 1.0f);
+	}
+}
+
 void AFloorSwitch::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Resolve the runtime enabled state from the editor property.
+	bIsEnabled = bStartEnabled;
 
 	// Bind overlap delegates here rather than in the constructor so that the
 	// UFunction reflection system is fully initialised before binding.
@@ -46,26 +71,25 @@ void AFloorSwitch::BeginPlay()
 		this, &AFloorSwitch::OnTriggerEndOverlap);
 
 	// Cache button positions from the editor-placed relative location of ButtonMesh.
-	// These are computed once here and never changed again — Tick always interpolates
-	// toward one of these two fixed targets, so there is no cumulative drift.
+	// These are computed once and never changed — Tick always interpolates toward
+	// one of these two fixed targets so there is no cumulative drift.
+	// This must stay in BeginPlay: OnConstruction can run at edit time before the
+	// actor has a valid world context for physics / gameplay queries.
 	if (ButtonMesh)
 	{
 		ReleasedLocation = ButtonMesh->GetRelativeLocation();
 		PressedLocation  = ReleasedLocation - FVector(0.f, 0.f, ButtonPressDepth);
-
-		// Create a dynamic material instance for ButtonMesh slot 0 so we can drive
-		// the IsPressed scalar parameter at runtime. BaseMesh is never touched.
-		if (UMaterialInterface* BaseMat = ButtonMesh->GetMaterial(0))
-		{
-			ButtonMaterialInstance = UMaterialInstanceDynamic::Create(BaseMat, this);
-			ButtonMesh->SetMaterial(0, ButtonMaterialInstance);
-		}
 	}
 
-	// Sync ButtonMesh position and material to the initial bIsPressed value.
-	// If the switch somehow starts pressed, both the mesh offset and the
-	// IsPressed parameter will reflect that immediately.
-	SetPressedState(bIsPressed);
+	// Ensure DMIs exist even if OnConstruction was somehow skipped.
+	// When OnConstruction has already run (the normal case) this is a no-op
+	// because InitMaterialInstances detects and reuses existing instances.
+	InitMaterialInstances();
+	ApplyMaterialParameters();
+
+	// Sync button position and IsPressed material parameter to the initial state.
+	// Pressed = Disabled: a disabled switch starts sunken; an enabled one elevated.
+	SetPressedState(!bIsEnabled);
 }
 
 void AFloorSwitch::Tick(float DeltaSeconds)
@@ -78,7 +102,7 @@ void AFloorSwitch::Tick(float DeltaSeconds)
 	}
 
 	// Target is one of the two stable positions computed once in BeginPlay.
-	// Reading and writing relative location keeps everything in local space,
+	// Reading and writing relative location keeps everything in local space
 	// so the button cannot drift regardless of the actor's world transform.
 	const FVector Target  = bIsPressed ? PressedLocation : ReleasedLocation;
 	const FVector Current = ButtonMesh->GetRelativeLocation();
@@ -105,24 +129,24 @@ void AFloorSwitch::OnTriggerBeginOverlap(
 		return;
 	}
 
-	// Toggle: each entry flips the platforms between forward and reverse
-	if (bToggleable)
-	{
-		bToggleState = !bToggleState;
-		SetTargetsActivated(bToggleState);
-		SetPressedState(bToggleState);
-		return;
-	}
-
-	// One-shot: ignore subsequent overlaps after the first activation
-	if (bOneShot && bHasTriggered)
+	if (!bIsEnabled)
 	{
 		return;
 	}
 
-	bHasTriggered = true;
 	SetTargetsActivated(true);
-	SetPressedState(true);
+	ActivatePressTargets();
+
+	if (bOneShot)
+	{
+		// Self-disable: sinks the button and blocks future overlaps.
+		// An external SetActivated(true) re-arms the switch.
+		SetActivated(false);
+	}
+	else
+	{
+		SetPressedState(true);
+	}
 }
 
 void AFloorSwitch::OnTriggerEndOverlap(
@@ -136,12 +160,14 @@ void AFloorSwitch::OnTriggerEndOverlap(
 		return;
 	}
 
-	// Toggle and one-shot switches do not respond to the player leaving
-	if (bToggleable || bOneShot)
+	// One-shot switches self-disabled on press; bIsEnabled is already false.
+	// The guard below covers both the one-shot and the externally-disabled cases.
+	if (!bIsEnabled)
 	{
 		return;
 	}
 
+	// Reusable: deactivate linked targets and return to released visual.
 	SetTargetsActivated(false);
 	SetPressedState(false);
 }
@@ -161,12 +187,101 @@ bool AFloorSwitch::IsLocalPlayer(const AActor* OtherActor)
 
 void AFloorSwitch::SetTargetsActivated(bool bActivate) const
 {
-	for (AActor* Target : LinkedTargets)
+	for (const TObjectPtr<AActor>& Target : LinkedTargets)
 	{
-		if (ISwitchable* Switchable = Cast<ISwitchable>(Target))
+		if (!Target)
+		{
+			continue;
+		}
+
+		if (ISwitchable* Switchable = Cast<ISwitchable>(Target.Get()))
 		{
 			Switchable->SetActivated(bActivate);
 		}
+	}
+}
+
+void AFloorSwitch::SetActivated(bool bActivate)
+{
+	bIsEnabled = bActivate;
+
+	// Pressed = Disabled, Released = Enabled — the visual state always matches
+	// the enabled state so the player can read the switch at a glance.
+	//
+	//   SetActivated(true)  — raises the button (IsPressed = 0); ready to use.
+	//   SetActivated(false) — sinks  the button (IsPressed = 1); spent / blocked.
+	SetPressedState(!bIsEnabled);
+}
+
+void AFloorSwitch::ActivatePressTargets() const
+{
+	for (AActor* Target : TargetsToEnableOnPress)
+	{
+		if (ISwitchable* Switchable = Cast<ISwitchable>(Target))
+		{
+			Switchable->SetActivated(true);
+		}
+	}
+
+	for (AActor* Target : TargetsToDisableOnPress)
+	{
+		if (ISwitchable* Switchable = Cast<ISwitchable>(Target))
+		{
+			Switchable->SetActivated(false);
+		}
+	}
+}
+
+void AFloorSwitch::InitMaterialInstances()
+{
+	// For each mesh: if slot 0 is already a DMI, reuse it — this prevents
+	// DMI-of-DMI chaining on repeated OnConstruction calls.  If it is a plain
+	// UMaterialInterface, create a fresh DMI and assign it back to the slot.
+	// Either way, the cached pointer is left valid (or null if no material).
+
+	if (BaseMesh)
+	{
+		UMaterialInterface* Mat = BaseMesh->GetMaterial(0);
+		if (UMaterialInstanceDynamic* ExistingDMI = Cast<UMaterialInstanceDynamic>(Mat))
+		{
+			// Already a DMI — reuse it; no new object is created.
+			BaseMaterialInstance = ExistingDMI;
+		}
+		else if (Mat)
+		{
+			BaseMaterialInstance = UMaterialInstanceDynamic::Create(Mat, this);
+			BaseMesh->SetMaterial(0, BaseMaterialInstance);
+		}
+	}
+
+	if (ButtonMesh)
+	{
+		UMaterialInterface* Mat = ButtonMesh->GetMaterial(0);
+		if (UMaterialInstanceDynamic* ExistingDMI = Cast<UMaterialInstanceDynamic>(Mat))
+		{
+			ButtonMaterialInstance = ExistingDMI;
+		}
+		else if (Mat)
+		{
+			ButtonMaterialInstance = UMaterialInstanceDynamic::Create(Mat, this);
+			ButtonMesh->SetMaterial(0, ButtonMaterialInstance);
+		}
+	}
+}
+
+void AFloorSwitch::ApplyMaterialParameters() const
+{
+	// SetVectorParameterValue is a no-op when the parameter does not exist in
+	// the material, so both calls are safe regardless of material setup.
+
+	if (BaseMaterialInstance)
+	{
+		BaseMaterialInstance->SetVectorParameterValue(TEXT("TileOffset"), TileOffset_Base);
+	}
+
+	if (ButtonMaterialInstance)
+	{
+		ButtonMaterialInstance->SetVectorParameterValue(TEXT("TileOffset"), TileOffset_Button);
 	}
 }
 
@@ -188,6 +303,6 @@ void AFloorSwitch::SetPressedState(bool bPressed)
 		// Snap immediately; Tick will not move the button further.
 		ButtonMesh->SetRelativeLocation(bIsPressed ? PressedLocation : ReleasedLocation);
 	}
-	// Animated case: Tick() drives the interpolation each frame toward the
-	// stable PressedLocation or ReleasedLocation — no offset is applied here.
+	// Animated case: Tick() drives the interpolation each frame toward
+	// PressedLocation or ReleasedLocation — no offset is applied here.
 }

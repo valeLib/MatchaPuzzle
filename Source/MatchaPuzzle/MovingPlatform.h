@@ -33,7 +33,9 @@ enum class EPlatformControlMode : uint8
  *  between two positions by an external floor switch (SwitchControlled), or
  *  follow continuous directional input from an AClawMachineLever (LeverControlled).
  *
- *  Automatic and SwitchControlled behaviour are completely unchanged.
+ *  SwitchControlled behaviour:
+ *   SetActivated(true)  — platform advances toward StartLocation + SwitchOffset.
+ *   SetActivated(false) — platform returns to StartLocation (when bReturnWhenReleased).
  *
  *  LeverControlled behaviour:
  *   AClawMachineLever calls SetLeverInput(H, V) whenever its values change.

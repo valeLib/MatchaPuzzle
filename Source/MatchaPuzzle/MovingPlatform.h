@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "Switchable.h"
 #include "ClawControllable.h"
+#include "LeverCycleTrackable.h"
 #include "MovingPlatform.generated.h"
 
 class UStaticMeshComponent;
@@ -48,7 +49,7 @@ enum class EPlatformControlMode : uint8
  *               + Normalize(LeverVerticalDirection)   * LeverVerticalScale   * V
  */
 UCLASS()
-class AMovingPlatform : public AActor, public ISwitchable, public IClawControllable
+class AMovingPlatform : public AActor, public ISwitchable, public IClawControllable, public ILeverCycleTrackable
 {
 	GENERATED_BODY()
 
@@ -81,6 +82,13 @@ public:
 	 * @param Vertical    Value within the lever's [VerticalMin, VerticalMax]
 	 */
 	virtual void SetLeverInput_Implementation(float Horizontal, float Vertical) override;
+
+	/**
+	 * ILeverCycleTrackable: reports whether the platform is at a stable endpoint.
+	 * Returns true when MoveProgress is 0 (Base) or 1 (Activated) — i.e. not
+	 * mid-travel.  Non-SwitchControlled modes always return true.
+	 */
+	virtual bool IsLeverCycleComplete() const override;
 
 protected:
 

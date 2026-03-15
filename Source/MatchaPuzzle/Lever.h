@@ -53,36 +53,35 @@ struct FActivatableTargetEntry
 
 	/**
 	 * How long (seconds) this target stays ON before being automatically turned OFF.
-	 * 0 = stay ON indefinitely — the target will only turn OFF if the lever
-	 * deactivates or is toggled off (unless bKeepActiveOnLeverOff is also set).
+	 * 0 = stay ON indefinitely — the target will never auto-deactivate.
+	 *
+	 * When ActiveDuration is 0, this entry does NOT block lever unlock:
+	 * its cycle contribution ends the moment Activate() is called (after the
+	 * delay) so the lever cannot be locked forever by a never-expiring target.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite,
 		meta = (ClampMin = "0", Units = "s",
-			DisplayName = "Active Duration (s)  [0 = indefinite]"))
+			DisplayName = "Active Duration (s)  [0 = indefinite, non-blocking]"))
 	float ActiveDuration = 3.f;
 
 	/**
-	 * When true, the lever turning OFF (or being toggled off) will NOT call
-	 * Deactivate() on this target — it stays ON until ActiveDuration expires
-	 * naturally (or forever if ActiveDuration is also 0).
+	 * When true, the lever's cycle completing will NOT call Deactivate() on
+	 * this target — it stays ON until ActiveDuration expires naturally
+	 * (or forever if ActiveDuration is also 0).
 	 *
-	 * Typical use: a one-way trigger — pull the lever once to reveal an object
-	 * permanently, regardless of the lever's bToggleable or bOneShot setting.
-	 *
-	 * Re-activating the lever while the target is already ON is also a no-op
-	 * for this entry (the running timer is left untouched).
+	 * Typical use: a one-way reveal — pull the lever once to permanently show
+	 * an object, regardless of the lever's bOneShot or re-pull settings.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite,
 		meta = (DisplayName = "Keep Active When Lever Off"))
 	bool bKeepActiveOnLeverOff = false;
 };
 
-// ── Internal-only timer bookkeeping (not a USTRUCT, never exposed) ────────────
+// ── Internal timer bookkeeping (not a USTRUCT, never exposed) ─────────────────
 
 /**
- *  Holds the two timer handles and runtime ON/OFF state for one
- *  FActivatableTargetEntry.  Lives in a parallel private array, indexed
- *  identically to ActivatableTargets.  Not reflected or exposed anywhere.
+ *  Holds runtime state for one FActivatableTargetEntry.
+ *  Lives in a parallel private array indexed identically to ActivatableTargets.
  */
 struct FActivatableTimerPair
 {
@@ -92,10 +91,36 @@ struct FActivatableTimerPair
 	/** Fires after ActiveDuration — calls ALever::DeactivateTarget(Index). */
 	FTimerHandle DeactivateTimer;
 
-	/** Whether this target is currently in the ON state. Used to decide
-	 *  whether an immediate Deactivate() call is needed when the lever
-	 *  deactivates or is toggled while the target is running. */
+	/** True while this target is in the ON state. */
 	bool bTargetIsActive = false;
+
+	/**
+	 * True when this entry has finished its contribution to the current cycle
+	 * and is no longer blocking lever unlock.
+	 *
+	 * Set to false when a new cycle starts.
+	 * Set to true:
+	 *   - When DeactivateTarget fires (ActiveDuration > 0 path).
+	 *   - Immediately after Activate() when ActiveDuration == 0 (non-blocking).
+	 *   - When the target is invalid or missing (so a bad reference never locks).
+	 *
+	 * Defaults to true so entries that are skipped at startup don't block.
+	 */
+	bool bCycleComplete = true;
+};
+
+// ── Lever state ───────────────────────────────────────────────────────────────
+
+/**
+ *  Internal state of the lever's cycle machine.
+ *  Replaces the old fragile boolean combination (bIsActive + bHasTriggered +
+ *  bToggleable + bToggleState).
+ */
+enum class ELeverState : uint8
+{
+	Idle,         // Ready: a new cycle can be started
+	RunningCycle, // Targets working; lever locked against new activations
+	Consumed      // One-shot: permanently spent; cannot activate again
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,22 +129,35 @@ struct FActivatableTimerPair
  *  A lever actor that smoothly rotates its handle and activates linked
  *  targets when the player enters its trigger volume.
  *
+ *  Cycle-based activation model
+ *  ─────────────────────────────
+ *  Every pull starts one full action cycle.  The lever locks immediately and
+ *  stays locked until every target has finished its work.  The player does not
+ *  need to remain inside the trigger — the cycle always runs to completion.
+ *
+ *  Cycle completion rules:
+ *   LinkedTargets (ISwitchable): considered complete when they return true from
+ *     ILeverCycleTrackable::IsLeverCycleComplete(), or instantly if they do not
+ *     implement ILeverCycleTrackable.
+ *   ActivatableTargets: complete when their Deactivate timer fires (ActiveDuration
+ *     > 0), or immediately after Activate() fires when ActiveDuration == 0.
+ *
+ *  Handle visual:
+ *   Animates to ON when the cycle starts; returns to OFF when the cycle ends
+ *   (non-one-shot).  One-shot levers stay permanently in the ON position.
+ *
  *  Two independent target systems operate in parallel:
  *
  *  LinkedTargets (ISwitchable)
  *  ───────────────────────────
- *  Direct binary control: SetActivated(true/false) is called immediately when
- *  the lever changes state.  Use this for platforms (AMovingPlatform,
- *  ARotatingPlatform) that should respond instantly and mirror the lever state.
+ *  Direct activation: SetActivated(true) is called when the cycle starts.
+ *  Platforms and similar actors respond immediately; the lever waits for
+ *  those that implement ILeverCycleTrackable.
  *
  *  ActivatableTargets (IActivatableTarget)
  *  ─────────────────────────────────────────
- *  Timed control: when the lever activates, each entry waits its ActivateDelay,
- *  then calls Activate().  After ActiveDuration seconds (measured from activation,
- *  not from lever press) it calls Deactivate() automatically.  If the lever
- *  deactivates before the delay fires, pending timers are cancelled.  If the
- *  lever deactivates while a target is ON, Deactivate() is called immediately.
- *  Toggling or re-activating the lever cancels all pending work and starts fresh.
+ *  Timed activation: each entry waits its ActivateDelay, calls Activate(),
+ *  then auto-deactivates after ActiveDuration (if > 0).
  *
  *  Component layout
  *  ────────────────
@@ -169,35 +207,34 @@ public:
 
 protected:
 
-	// ── Platform targets (ISwitchable — direct, immediate control) ─────────────
+	// ── Linked targets (ISwitchable — direct activation) ──────────────────────
 
 	/**
-	 * Actors to activate immediately when the lever is pulled.
+	 * Actors that receive SetActivated(true) when the cycle starts.
 	 * Each entry must implement ISwitchable; non-implementing actors are skipped.
-	 * Use for AMovingPlatform / ARotatingPlatform in SwitchControlled mode.
+	 *
+	 * If a target also implements ILeverCycleTrackable, the lever waits for
+	 * IsLeverCycleComplete() before unlocking.  Targets that don't implement
+	 * ILeverCycleTrackable are treated as instantly complete.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever|Targets")
 	TArray<TObjectPtr<AActor>> LinkedTargets;
 
-	// ── Activatable targets (IActivatableTarget — timed, delayed control) ──────
+	// ── Activatable targets (IActivatableTarget — timed activation) ───────────
 
 	/**
-	 * Actors to activate after a configurable delay, then deactivate after a
+	 * Actors activated after a configurable delay and deactivated after a
 	 * configurable duration.  Each entry has independent timing settings.
-	 * Each actor must implement IActivatableTarget (set up in Blueprint Class
-	 * Settings, or inherit IActivatableTarget in C++).
 	 *
-	 *  Timing flow per entry (lever activates at T=0):
-	 *   T = 0              lever activates
-	 *   T = ActivateDelay  → Activate() called on this target
-	 *   T = ActivateDelay + ActiveDuration  → Deactivate() called automatically
-	 *                      (skipped if ActiveDuration == 0 — stays ON indefinitely)
+	 *  Timing flow per entry (cycle starts at T=0):
+	 *   T = 0                          cycle starts
+	 *   T = ActivateDelay              Activate() called on this target
+	 *   T = ActivateDelay+ActiveDur    Deactivate() called automatically
+	 *                                  (skipped if ActiveDuration == 0)
 	 *
-	 *  When the lever deactivates:
-	 *   - Pending Activate timers are cancelled.
-	 *   - If the target is already ON, Deactivate() is called immediately.
-	 *
-	 *  Re-activating (toggle) resets the cycle from scratch.
+	 *  If ActiveDuration == 0, the target stays ON indefinitely and this entry
+	 *  does not block lever unlock (cycle contribution ends right after Activate
+	 *  fires).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever|Activatable Targets")
 	TArray<FActivatableTargetEntry> ActivatableTargets;
@@ -205,16 +242,11 @@ protected:
 	// ── Behaviour ─────────────────────────────────────────────────────────────
 
 	/**
-	 * When true, each player entry flips the lever between on and off.
-	 * The lever does not revert when the player walks away.
-	 * Takes priority over bOneShot when both flags are set.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever|Behaviour")
-	bool bToggleable = false;
-
-	/**
-	 * When true, the lever activates once and never deactivates regardless of
-	 * whether the player stays inside the trigger.  Ignored if bToggleable is set.
+	 * When true, the lever fires exactly one cycle and then permanently locks
+	 * in the ON position (Consumed state).  No further activations are possible.
+	 *
+	 * When false, the lever returns to Idle after each cycle and can be pulled
+	 * again.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever|Behaviour")
 	bool bOneShot = false;
@@ -291,30 +323,30 @@ private:
 
 	// ── Lever state ───────────────────────────────────────────────────────────
 
-	/** Whether the lever is currently in the active (on) state */
-	bool bIsActive = false;
-
-	/** Prevents a one-shot lever from re-triggering after the first activation */
-	bool bHasTriggered = false;
-
-	/** Current toggle state — used only when bToggleable is true */
-	bool bToggleState = false;
+	/**
+	 * Current state of the lever cycle machine.
+	 *   Idle         — ready for the next pull
+	 *   RunningCycle — targets in progress; new pulls are blocked
+	 *   Consumed     — one-shot: permanently locked in the ON position
+	 */
+	ELeverState LeverState = ELeverState::Idle;
 
 	/**
 	 * Normalised animation progress: 0 = HandleOffAngle, 1 = HandleOnAngle.
-	 * Advanced or rewound each tick based on bIsActive.
+	 * Advanced toward 1 when a cycle starts, rewound to 0 when it ends
+	 * (non-one-shot).  Driven by TickHandleAnimation each frame.
 	 */
 	float HandleProgress = 0.f;
 
 	// ── Activatable target runtime state ──────────────────────────────────────
 
 	/**
-	 * Parallel to ActivatableTargets — one pair of timer handles + active flag
+	 * Parallel to ActivatableTargets — one pair of timer handles + state flags
 	 * per entry.  Populated in BeginPlay.  Never serialised or exposed.
 	 */
 	TArray<FActivatableTimerPair> ActivatableTimers;
 
-	// ── Overlap callbacks ──────────────────────────────────────────────────────
+	// ── Overlap callbacks ─────────────────────────────────────────────────────
 
 	UFUNCTION()
 	void OnTriggerBeginOverlap(
@@ -337,40 +369,52 @@ private:
 	/** Returns true if OtherActor is a pawn controlled by a local player */
 	static bool IsLocalPlayer(const AActor* OtherActor);
 
-	/** Sets active state, notifies ISwitchable targets, schedules activatable
-	 *  targets, applies visual feedback. */
-	void SetLeverActive(bool bActivate);
-
-	/** Calls SetActivated on every ISwitchable entry in LinkedTargets */
-	void SetTargetsActivated(bool bActivate) const;
+	/** Begins one full action cycle: activates all targets, locks the lever. */
+	void StartCycle();
 
 	/**
-	 * Central dispatcher for the activatable target system.
-	 *
-	 * bActivate = true  — cancels any in-flight timers, deactivates targets that
-	 *                     are currently ON, then schedules fresh activation
-	 *                     (immediately or after ActivateDelay) per entry.
-	 * bActivate = false — cancels pending activation timers; immediately calls
-	 *                     Deactivate() on any targets that are currently ON.
+	 * Called when every target has finished its work for this cycle.
+	 * Transitions to Idle (non-one-shot) or Consumed (one-shot).
 	 */
-	void ScheduleActivatableTargets(bool bActivate);
+	void CompleteCycle();
 
 	/**
-	 * Timer callback: turns one activatable target ON and, if ActiveDuration > 0,
-	 * schedules its automatic deactivation.  Bound with the entry Index so each
-	 * target has its own independent timer chain.
+	 * Returns true when every linked target and every activatable target entry
+	 * has finished its contribution to the current cycle.
+	 * Called each tick while LeverState == RunningCycle.
+	 */
+	bool AreAllTargetsComplete() const;
+
+	/** Polls AreAllTargetsComplete() and calls CompleteCycle() when ready. */
+	void TickCycleCompletion(float DeltaTime);
+
+	/** Calls SetActivated(true) on every ISwitchable entry in LinkedTargets. */
+	void ActivateLinkedTargets() const;
+
+	/**
+	 * Starts the ActivatableTarget timer chain for a new cycle.
+	 * Resets bCycleComplete flags, cancels leftover timers, and schedules
+	 * fresh Activate() calls (immediately or after ActivateDelay).
+	 */
+	void StartActivatableTargetCycle();
+
+	/**
+	 * Timer callback: calls Activate() on one entry and schedules its
+	 * automatic Deactivate() (if ActiveDuration > 0).
+	 * Sets bCycleComplete immediately when ActiveDuration == 0.
 	 */
 	void ActivateTarget(int32 Index);
 
 	/**
-	 * Timer callback (or immediate call): turns one activatable target OFF and
-	 * resets bTargetIsActive.  Safe to call even if the target is already OFF.
+	 * Timer callback or direct call: calls Deactivate() on one entry and
+	 * sets bCycleComplete = true so the lever knows this entry is done.
 	 */
 	void DeactivateTarget(int32 Index);
 
 	/**
-	 * Each frame: advances HandleProgress toward the target (0 or 1), then
-	 * updates LeverHandle's relative rotation with a SmoothStep ease.
+	 * Each frame: advances HandleProgress toward the target (0 = off, 1 = on)
+	 * and updates LeverHandle's relative rotation with a SmoothStep ease.
+	 * The target is 1 while RunningCycle or Consumed, 0 while Idle.
 	 */
 	void TickHandleAnimation(float DeltaTime);
 

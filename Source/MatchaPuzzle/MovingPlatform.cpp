@@ -54,6 +54,19 @@ void AMovingPlatform::SetActivated(bool bActivate)
 	bIsActivated = bActivate;
 }
 
+bool AMovingPlatform::IsLeverCycleComplete() const
+{
+	if (ControlMode != EPlatformControlMode::SwitchControlled)
+	{
+		// Automatic and LeverControlled modes have no discrete cycle endpoint.
+		return true;
+	}
+
+	// In transit: MoveProgress is strictly between 0 and 1.
+	// Complete when settled at Base (0) or Activated (1).
+	return MoveProgress <= 0.f || MoveProgress >= 1.f;
+}
+
 void AMovingPlatform::SetLeverInput_Implementation(float Horizontal, float Vertical)
 {
 	// Guard: this API is only meaningful in LeverControlled mode

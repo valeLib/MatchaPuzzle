@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Switchable.h"
+#include "ClawControllable.h"
 #include "MovingPlatform.generated.h"
 
 class UStaticMeshComponent;
@@ -23,19 +24,28 @@ UENUM(BlueprintType)
 enum class EPlatformControlMode : uint8
 {
 	Automatic        UMETA(DisplayName = "Automatic (oscillation)"),
-	SwitchControlled UMETA(DisplayName = "Switch Controlled")
+	SwitchControlled UMETA(DisplayName = "Switch Controlled"),
+	LeverControlled  UMETA(DisplayName = "Lever Controlled (claw machine)")
 };
 
 /**
- *  A platform that can either oscillate continuously (Automatic) or be driven
- *  between two positions by an external floor switch (SwitchControlled).
+ *  A platform that can either oscillate continuously (Automatic), be driven
+ *  between two positions by an external floor switch (SwitchControlled), or
+ *  follow continuous directional input from an AClawMachineLever (LeverControlled).
  *
- *  Automatic behaviour is identical to the original implementation and is
- *  completely unaffected by the new mode.  SwitchControlled behaviour is
- *  triggered via SetActivated().
+ *  Automatic and SwitchControlled behaviour are completely unchanged.
+ *
+ *  LeverControlled behaviour:
+ *   AClawMachineLever calls SetLeverInput(H, V) whenever its values change.
+ *   Each Tick the platform position is recomputed from StartLocation using the
+ *   stored values, so there is no drift regardless of frame rate:
+ *
+ *   NewLocation = StartLocation
+ *               + Normalize(LeverHorizontalDirection) * LeverHorizontalScale * H
+ *               + Normalize(LeverVerticalDirection)   * LeverVerticalScale   * V
  */
 UCLASS()
-class AMovingPlatform : public AActor, public ISwitchable
+class AMovingPlatform : public AActor, public ISwitchable, public IClawControllable
 {
 	GENERATED_BODY()
 
@@ -58,6 +68,16 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Platform|Switch")
 	virtual void SetActivated(bool bActivate) override;
+
+	/**
+	 * Receives continuous directional input from AClawMachineLever.
+	 * Only takes effect when ControlMode == LeverControlled.
+	 * Stores the values; the actual position update runs in TickLeverControlled.
+	 *
+	 * @param Horizontal  Value within the lever's [HorizontalMin, HorizontalMax]
+	 * @param Vertical    Value within the lever's [VerticalMin, VerticalMax]
+	 */
+	virtual void SetLeverInput_Implementation(float Horizontal, float Vertical) override;
 
 protected:
 
@@ -120,11 +140,52 @@ protected:
 			EditConditionHides))
 	bool bReturnWhenReleased = true;
 
+	// ── Lever-controlled mode parameters ─────────────────────────────────────
+
+	/**
+	 * World-space direction the platform moves when horizontal lever input is
+	 * positive (E key).  The vector is normalised at runtime, so only its
+	 * direction matters — use LeverHorizontalScale for magnitude.
+	 * Example: (0, 1, 0) moves the platform along the world Y axis.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Lever",
+		meta = (EditCondition = "ControlMode == EPlatformControlMode::LeverControlled",
+			EditConditionHides))
+	FVector LeverHorizontalDirection = FVector(0.f, 1.f, 0.f);
+
+	/**
+	 * Maximum displacement (units) along LeverHorizontalDirection when the
+	 * horizontal lever is at its maximum value.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Lever",
+		meta = (EditCondition = "ControlMode == EPlatformControlMode::LeverControlled",
+			EditConditionHides))
+	float LeverHorizontalScale = 200.f;
+
+	/**
+	 * World-space direction the platform moves when vertical lever input is
+	 * positive (A key / down press).  Normalised at runtime.
+	 * Example: (0, 0, -1) lowers the platform when the lever is pushed down.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Lever",
+		meta = (EditCondition = "ControlMode == EPlatformControlMode::LeverControlled",
+			EditConditionHides))
+	FVector LeverVerticalDirection = FVector(0.f, 0.f, -1.f);
+
+	/**
+	 * Maximum displacement (units) along LeverVerticalDirection when the
+	 * vertical lever is at its maximum value.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform|Lever",
+		meta = (EditCondition = "ControlMode == EPlatformControlMode::LeverControlled",
+			EditConditionHides))
+	float LeverVerticalScale = 200.f;
+
 private:
 
 	// ── Shared state ──────────────────────────────────────────────────────────
 
-	/** Location recorded at BeginPlay — origin for both movement modes */
+	/** Location recorded at BeginPlay — origin for all movement modes */
 	FVector StartLocation;
 
 	// ── Automatic mode state ──────────────────────────────────────────────────
@@ -143,6 +204,14 @@ private:
 	 */
 	float MoveProgress = 0.f;
 
+	// ── Lever-controlled mode state ───────────────────────────────────────────
+
+	/** Last horizontal value received from the lever. Set by SetLeverInput_Implementation. */
+	float LeverHorizontalInput = 0.f;
+
+	/** Last vertical value received from the lever. Set by SetLeverInput_Implementation. */
+	float LeverVerticalInput = 0.f;
+
 	// ── Private tick helpers ──────────────────────────────────────────────────
 
 	/** Contains the original automatic oscillation logic, completely unchanged */
@@ -150,6 +219,14 @@ private:
 
 	/** Contains the switch-driven interpolation logic */
 	void TickSwitchControlled(float DeltaTime);
+
+	/**
+	 * Recomputes the platform position from StartLocation using the last stored
+	 * lever input values.  Called every frame in LeverControlled mode.
+	 * Position is always derived from StartLocation, never accumulated, so there
+	 * is no drift regardless of how long the lever has been held.
+	 */
+	void TickLeverControlled();
 
 	/**
 	 * After each teleport move, finds any pawns whose capsule now overlaps the

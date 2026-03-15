@@ -19,7 +19,7 @@ void AMovingPlatform::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Record world position as origin for both movement modes
+	// Record world position as origin for all movement modes
 	StartLocation = GetActorLocation();
 }
 
@@ -36,6 +36,10 @@ void AMovingPlatform::Tick(float DeltaTime)
 	case EPlatformControlMode::SwitchControlled:
 		TickSwitchControlled(DeltaTime);
 		break;
+
+	case EPlatformControlMode::LeverControlled:
+		TickLeverControlled();
+		break;
 	}
 }
 
@@ -48,6 +52,18 @@ void AMovingPlatform::SetActivated(bool bActivate)
 	}
 
 	bIsActivated = bActivate;
+}
+
+void AMovingPlatform::SetLeverInput_Implementation(float Horizontal, float Vertical)
+{
+	// Guard: this API is only meaningful in LeverControlled mode
+	if (ControlMode != EPlatformControlMode::LeverControlled)
+	{
+		return;
+	}
+
+	LeverHorizontalInput = Horizontal;
+	LeverVerticalInput   = Vertical;
 }
 
 // ── Private tick helpers ───────────────────────────────────────────────────────
@@ -123,6 +139,31 @@ void AMovingPlatform::TickSwitchControlled(float DeltaTime)
 	const float SmoothedProgress = FMath::SmoothStep(0.f, 1.f, MoveProgress);
 
 	SetActorLocation(StartLocation + SwitchOffset * SmoothedProgress);
+	DisplaceOverlappingPawns();
+}
+
+void AMovingPlatform::TickLeverControlled()
+{
+	// Recompute from the fixed StartLocation every frame.
+	// This guarantees no drift: the position is always a pure function of
+	// StartLocation and the two input scalars.  Accumulating onto the current
+	// location is intentionally avoided.
+	//
+	// NewLocation = StartLocation
+	//             + Normalize(LeverHorizontalDirection) * LeverHorizontalScale * LeverHorizontalInput
+	//             + Normalize(LeverVerticalDirection)   * LeverVerticalScale   * LeverVerticalInput
+	//
+	// GetSafeNormal returns FVector::ZeroVector when the input is near-zero,
+	// which makes the corresponding term a no-op rather than a crash.
+
+	const FVector HDir = LeverHorizontalDirection.GetSafeNormal();
+	const FVector VDir = LeverVerticalDirection.GetSafeNormal();
+
+	const FVector NewLocation = StartLocation
+		+ HDir * LeverHorizontalScale * LeverHorizontalInput
+		+ VDir * LeverVerticalScale   * LeverVerticalInput;
+
+	SetActorLocation(NewLocation);
 	DisplaceOverlappingPawns();
 }
 

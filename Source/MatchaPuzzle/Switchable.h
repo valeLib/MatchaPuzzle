@@ -34,4 +34,20 @@ public:
 	 * Implementors decide what "active" means for their specific type.
 	 */
 	virtual void SetActivated(bool bActivate) {}
+
+	/**
+	 * Activate or deactivate this object with an optional direction modifier.
+	 *
+	 * DirectionModifier scales the object's internal movement offset:
+	 *   1.0  = normal direction   (e.g. platform moves toward +SwitchOffset)
+	 *  -1.0  = inverted direction (e.g. platform moves toward -SwitchOffset)
+	 *
+	 * The default implementation ignores the modifier and delegates to
+	 * SetActivated, so all existing implementors remain fully compatible
+	 * without any changes on their side.
+	 */
+	virtual void SetActivatedWithDirection(bool bActivate, float DirectionModifier)
+	{
+		SetActivated(bActivate);
+	}
 };

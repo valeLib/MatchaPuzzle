@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ActivatableTarget.h"
+#include "Switchable.h"
 #include "ActivatableObject.generated.h"
 
 class UStaticMeshComponent;
@@ -27,7 +28,7 @@ class UStaticMeshComponent;
  *      — swap your Activate/Deactivate logic in that case.
  */
 UCLASS()
-class AActivatableObject : public AActor, public IActivatableTarget
+class AActivatableObject : public AActor, public IActivatableTarget, public ISwitchable
 {
 	GENERATED_BODY()
 
@@ -48,6 +49,9 @@ public:
 	/** Hide the object and disable its collision. */
 	virtual void Deactivate_Implementation() override;
 
+	/** ISwitchable — delegates to SetActivationState so both interfaces share the same logic. */
+	virtual void SetActivated(bool bActivated) override;
+
 protected:
 
 	/**
@@ -57,4 +61,21 @@ protected:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activatable Object")
 	bool bStartHidden = true;
+
+	/** When true, child components (scene/primitive) are also hidden/shown. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activatable")
+	bool bAffectChildComponents = true;
+
+	/** When true, actors directly attached to this actor are also hidden/shown. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activatable")
+	bool bAffectAttachedActors = true;
+
+	/** When true, the attached-actors search recurses into their children as well. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activatable")
+	bool bRecursiveAttachedActors = true;
+
+private:
+
+	/** Central helper that applies the activation state to this actor and optionally its children. */
+	void SetActivationState(bool bActive);
 };
